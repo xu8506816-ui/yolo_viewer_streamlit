@@ -1,0 +1,8 @@
+streamlit>=1.38
+torch>=1.13
+torchvision>=0.14
+opencv-python-headless>=4.8
+numpy>=1.23
+pandas>=1.5
+Pillow>=9.5
+tqdm>=4.65
