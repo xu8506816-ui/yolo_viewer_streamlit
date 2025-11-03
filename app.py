@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import io
+import tempfile
+from collections import Counter
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pandas as pd
 import streamlit as st
 from PIL import Image
@@ -23,8 +27,8 @@ def _cached_model(weights_path: str, device: str, imgsz: int) -> LoadedModel:
 def ensure_model(weights_path: Path, device: str, imgsz: int) -> LoadedModel:
     if not weights_path.is_file():
         st.error(
-            f"找不到權重檔案：`{weights_path}`。\n"
-            "請確認權重路徑輸入正確，或將訓練好的 `.pt` 檔案放到該位置。"
+            f"找不到權重檔案 `{weights_path}`。\n"
+            "請確認輸入的路徑正確，或將訓練好的 `.pt` 檔案放到指定位置。"
         )
         st.stop()
 
@@ -32,47 +36,35 @@ def ensure_model(weights_path: Path, device: str, imgsz: int) -> LoadedModel:
         return _cached_model(str(weights_path), device, imgsz)
     except FileNotFoundError:
         st.error(
-            f"找不到權重檔案：`{weights_path}`。\n"
-            "請確認 YOLOv7 訓練好的 `.pt` 檔案位在專案底下對應路徑。"
+            f"讀取權重檔案 `{weights_path}` 失敗。\n"
+            "請確認 YOLOv7 的 `.pt` 模型位於專案根目錄下的正確路徑。"
         )
         st.stop()
     except YoloV7MissingError as exc:
         st.error(str(exc))
         st.info(
-            "範例：`git clone https://github.com/WongKinYiu/yolov7.git yolov7`，"
-            "並確保資料夾位在此專案根目錄。"
+            "範例：`git clone https://github.com/WongKinYiu/yolov7.git yolov7`\n"
+            "請確保資料夾位在專案根目錄。"
         )
         st.stop()
 
 
-def main() -> None:
-    st.title("YOLOv7 影像偵測檢視器")
-    st.caption("上傳照片後即時套用訓練完成的 YOLOv7 模型進行標註。")
-
-    with st.sidebar:
-        st.header("推論設定")
-        weights_path = Path(
-            st.text_input(
-                "權重檔案路徑 (.pt)",
-                value=str(DEFAULT_WEIGHTS),
-                help="預設使用 `exp_custom_ciou_sgd/weights/best.pt`。",
-            )
-        ).expanduser()
-
-        device = st.selectbox("裝置", options=["cpu", "0"], index=0, help="沒有 GPU 時選擇 `cpu`。")
-        imgsz = st.slider("推論輸入尺寸 (pix)", min_value=256, max_value=1280, value=640, step=64)
-        conf_thres = st.slider("信心閾值", min_value=0.05, max_value=0.95, value=0.25, step=0.05)
-        iou_thres = st.slider("IoU 閾值", min_value=0.1, max_value=0.9, value=0.45, step=0.05)
-
-    uploaded = st.file_uploader("上傳圖片", type=["jpg", "jpeg", "png", "bmp", "webp"])
+def _render_image_inference(
+    weights_path: Path, device: str, imgsz: int, conf_thres: float, iou_thres: float
+) -> None:
+    uploaded = st.file_uploader(
+        "上傳圖片",
+        type=["jpg", "jpeg", "png", "bmp", "webp"],
+        key="image_uploader",
+    )
     if not uploaded:
-        st.info("請先選擇一張圖片。")
+        st.info("請上傳一張圖片。")
         return
 
     try:
         image = Image.open(uploaded).convert("RGB")
     except Exception as exc:  # pylint: disable=broad-except
-        st.error(f"無法讀取圖片：{exc}")
+        st.error(f"無法讀取圖片: {exc}")
         return
 
     st.subheader("原始圖片")
@@ -91,8 +83,8 @@ def main() -> None:
     if detections:
         records = [
             {
-                "分類": det.label,
-                "信心": f"{det.confidence:.3f}",
+                "類別": det.label,
+                "信心值": f"{det.confidence:.3f}",
                 "邊界框 (x1, y1, x2, y2)": det.bbox,
             }
             for det in detections
@@ -108,8 +100,151 @@ def main() -> None:
             mime="image/png",
         )
     else:
-        st.warning("未偵測到任何物件，請調整參數或更換圖片試試。")
+        st.warning("未偵測到任何物件，請調整參數或更換圖片後再試。")
+
+
+def _render_video_inference(
+    weights_path: Path, device: str, imgsz: int, conf_thres: float, iou_thres: float
+) -> None:
+    video_file = st.file_uploader(
+        "上傳影片",
+        type=["mp4", "mov", "avi", "mkv", "webm"],
+        key="video_uploader",
+        help="影片會逐格推論並輸出標註後的 MP4 檔案。",
+    )
+    if not video_file:
+        st.info("請上傳一段影片。")
+        return
+
+    suffix = Path(video_file.name).suffix or ".mp4"
+    detections_summary: Counter[str] = Counter()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp_input:
+        tmp_input.write(video_file.getbuffer())
+        input_path = Path(tmp_input.name)
+
+    output_path: Path | None = None
+    cap = cv2.VideoCapture(str(input_path))
+    writer: cv2.VideoWriter | None = None
+
+    try:
+        if not cap.isOpened():
+            st.error("無法開啟影片檔案，請確認格式是否支援。")
+            return
+
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps or fps <= 0:
+            fps = 25.0
+
+        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        if width <= 0 or height <= 0:
+            st.error("無法取得影片尺寸，可能檔案已損壞。")
+            return
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp_output:
+            output_path = Path(tmp_output.name)
+
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
+        if not writer.isOpened():
+            st.error("無法建立輸出影片，請確認系統支援 MP4 編碼。")
+            return
+
+        model = ensure_model(weights_path, device=device, imgsz=imgsz)
+        progress = st.progress(0.0) if total_frames else None
+        frame_idx = 0
+
+        with st.spinner("影片偵測中，請稍候..."):
+            while True:
+                success, frame = cap.read()
+                if not success:
+                    break
+                frame_idx += 1
+
+                rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(rgb_frame)
+                detections, annotated = run_inference(
+                    model, image=image, conf_thres=conf_thres, iou_thres=iou_thres
+                )
+
+                for det in detections:
+                    detections_summary[det.label] += 1
+
+                annotated_frame = cv2.cvtColor(np.array(annotated), cv2.COLOR_RGB2BGR)
+                writer.write(annotated_frame)
+
+                if progress is not None:
+                    progress.progress(min(frame_idx / total_frames, 1.0))
+
+        if progress is not None:
+            progress.progress(1.0)
+
+        if output_path is None or not output_path.exists():
+            st.error("產生標註影片時發生問題。")
+            return
+
+        video_bytes = output_path.read_bytes()
+        st.subheader("標註影片")
+        st.video(video_bytes)
+        st.download_button(
+            "下載標註影片",
+            data=video_bytes,
+            file_name="annotated_video.mp4",
+            mime="video/mp4",
+        )
+
+        if detections_summary:
+            summary_df = pd.DataFrame(
+                [
+                    {"類別": label, "偵測次數": count}
+                    for label, count in sorted(
+                        detections_summary.items(), key=lambda item: item[1], reverse=True
+                    )
+                ]
+            )
+            st.dataframe(summary_df, use_container_width=True)
+        else:
+            st.warning("影片中未偵測到任何物件，請調整參數後重試。")
+    finally:
+        cap.release()
+        if writer is not None:
+            writer.release()
+        input_path.unlink(missing_ok=True)
+        if output_path is not None:
+            output_path.unlink(missing_ok=True)
+
+
+def main() -> None:
+    st.title("YOLOv7 影像偵測檢視器")
+    st.caption("上傳影像或影片即可查看訓練好的 YOLOv7 模型推論結果。")
+
+    with st.sidebar:
+        st.header("推論設定")
+        weights_path = Path(
+            st.text_input(
+                "權重檔案路徑 (.pt)",
+                value=str(DEFAULT_WEIGHTS),
+                help="預設使用 `exp_custom_ciou_sgd/weights/best.pt`。",
+            )
+        ).expanduser()
+
+        device = st.selectbox("裝置", options=["cpu", "0"], index=0, help="沒有 GPU 時選擇 `cpu`。")
+        imgsz = st.slider("輸入尺寸 (pix)", min_value=256, max_value=1280, value=640, step=64)
+        conf_thres = st.slider("信心閾值", min_value=0.05, max_value=0.95, value=0.25, step=0.05)
+        iou_thres = st.slider("IoU 閾值", min_value=0.1, max_value=0.9, value=0.45, step=0.05)
+
+    image_tab, video_tab = st.tabs(["圖片偵測", "影片偵測"])
+
+    with image_tab:
+        _render_image_inference(weights_path, device, imgsz, conf_thres, iou_thres)
+
+    with video_tab:
+        _render_video_inference(weights_path, device, imgsz, conf_thres, iou_thres)
 
 
 if __name__ == "__main__":
     main()
+
