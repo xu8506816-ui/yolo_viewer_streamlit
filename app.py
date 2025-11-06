@@ -182,6 +182,13 @@ def _render_video_inference(
         if progress is not None:
             progress.progress(1.0)
 
+        # 先釋放資源，確保影片已完整寫入磁碟
+        cap.release()
+        cap = None
+        if writer is not None:
+            writer.release()
+        writer = None
+
         if output_path is None or not output_path.exists():
             st.error("產生標註影片時發生問題。")
             return
@@ -209,7 +216,8 @@ def _render_video_inference(
         else:
             st.warning("影片中未偵測到任何物件，請調整參數後重試。")
     finally:
-        cap.release()
+        if cap is not None:
+            cap.release()
         if writer is not None:
             writer.release()
         input_path.unlink(missing_ok=True)
@@ -247,4 +255,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
