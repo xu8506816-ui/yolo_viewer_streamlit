@@ -50,7 +50,10 @@ def ensure_model(weights_path: Path, device: str, imgsz: int) -> LoadedModel:
 
 
 def _render_image_inference(
-    weights_path: Path, device: str, imgsz: int, conf_thres: float, iou_thres: float
+    model: LoadedModel,
+    conf_thres: float,
+    iou_thres: float,
+    per_class_conf: dict[str, float] | None = None,
 ) -> None:
     uploaded = st.file_uploader(
         "上傳圖片",
@@ -70,11 +73,13 @@ def _render_image_inference(
     st.subheader("原始圖片")
     st.image(image, use_container_width=True)
 
-    model = ensure_model(weights_path, device=device, imgsz=imgsz)
-
     with st.spinner("推論中，請稍候..."):
         detections, annotated = run_inference(
-            model, image=image, conf_thres=conf_thres, iou_thres=iou_thres
+            model,
+            image=image,
+            conf_thres=conf_thres,
+            iou_thres=iou_thres,
+            per_class_confidence=per_class_conf,
         )
 
     st.subheader("標註結果")
@@ -104,7 +109,10 @@ def _render_image_inference(
 
 
 def _render_video_inference(
-    weights_path: Path, device: str, imgsz: int, conf_thres: float, iou_thres: float
+    model: LoadedModel,
+    conf_thres: float,
+    iou_thres: float,
+    per_class_conf: dict[str, float] | None = None,
 ) -> None:
     video_file = st.file_uploader(
         "上傳影片",
@@ -153,7 +161,6 @@ def _render_video_inference(
             st.error("無法建立輸出影片，請確認系統支援 MP4 編碼。")
             return
 
-        model = ensure_model(weights_path, device=device, imgsz=imgsz)
         progress = st.progress(0.0) if total_frames else None
         frame_idx = 0
 
@@ -167,7 +174,11 @@ def _render_video_inference(
                 rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                 image = Image.fromarray(rgb_frame)
                 detections, annotated = run_inference(
-                    model, image=image, conf_thres=conf_thres, iou_thres=iou_thres
+                    model,
+                    image=image,
+                    conf_thres=conf_thres,
+                    iou_thres=iou_thres,
+                    per_class_confidence=per_class_conf,
                 )
 
                 for det in detections:
@@ -229,6 +240,8 @@ def main() -> None:
     st.title("YOLOv7 影像偵測檢視器")
     st.caption("上傳影像或影片即可查看訓練好的 YOLOv7 模型推論結果。")
 
+    per_class_conf: dict[str, float] = {}
+
     with st.sidebar:
         st.header("推論設定")
         weights_path = Path(
@@ -243,14 +256,63 @@ def main() -> None:
         imgsz = st.slider("輸入尺寸 (pix)", min_value=256, max_value=1280, value=640, step=64)
         conf_thres = st.slider("信心閾值", min_value=0.05, max_value=0.95, value=0.25, step=0.05)
         iou_thres = st.slider("IoU 閾值", min_value=0.1, max_value=0.9, value=0.45, step=0.05)
+        model = ensure_model(weights_path, device=device, imgsz=imgsz)
+        class_names = [str(name) for name in model.class_names]
+        overrides_state: dict[str, float] = st.session_state.setdefault(
+            "class_conf_overrides", {}
+        )
+
+        if class_names:
+            with st.expander("\u4f9d\u985e\u5225\u81ea\u8a02\u4fe1\u5fc3\u95be\u503c", expanded=bool(overrides_state)):
+                st.caption("\u672a\u8a2d\u5b9a\u7684\u985e\u5225\u6703\u6cbf\u7528\u4e0a\u65b9\u7684\u5168\u57df\u4fe1\u5fc3\u95be\u503c\u3002")
+                default_selection = [label for label in overrides_state if label in class_names]
+                selected_labels = st.multiselect(
+                    "\u9078\u64c7\u8981\u8abf\u6574\u7684\u985e\u5225",
+                    options=class_names,
+                    default=default_selection,
+                )
+
+                new_overrides: dict[str, float] = {}
+                for label in selected_labels:
+                    slider_key = f"class_conf_slider_{label}"
+                    default_value = float(overrides_state.get(label, conf_thres))
+                    new_overrides[label] = st.slider(
+                        label,
+                        min_value=0.05,
+                        max_value=0.95,
+                        value=default_value,
+                        step=0.05,
+                        key=slider_key,
+                    )
+
+                removed_labels = set(overrides_state) - set(new_overrides)
+                for removed in removed_labels:
+                    st.session_state.pop(f"class_conf_slider_{removed}", None)
+
+                st.session_state["class_conf_overrides"] = new_overrides
+                per_class_conf = new_overrides
 
     image_tab, video_tab = st.tabs(["圖片偵測", "影片偵測"])
+    per_class_conf_arg = per_class_conf or None
+    inference_conf = (
+        min([conf_thres] + list(per_class_conf.values())) if per_class_conf else conf_thres
+    )
 
     with image_tab:
-        _render_image_inference(weights_path, device, imgsz, conf_thres, iou_thres)
+        _render_image_inference(
+            model,
+            conf_thres=inference_conf,
+            iou_thres=iou_thres,
+            per_class_conf=per_class_conf_arg,
+        )
 
     with video_tab:
-        _render_video_inference(weights_path, device, imgsz, conf_thres, iou_thres)
+        _render_video_inference(
+            model,
+            conf_thres=inference_conf,
+            iou_thres=iou_thres,
+            per_class_conf=per_class_conf_arg,
+        )
 
 
 if __name__ == "__main__":

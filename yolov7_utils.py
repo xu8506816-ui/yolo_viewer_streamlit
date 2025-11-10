@@ -14,7 +14,7 @@ import os
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Sequence, Tuple, Union
+from typing import List, Mapping, Sequence, Tuple, Union
 
 try:
     import cv2  # noqa: F401  # Needed by YOLOv7 submodules
@@ -174,6 +174,7 @@ def run_inference(
     image: Image.Image,
     conf_thres: float = 0.25,
     iou_thres: float = 0.45,
+    per_class_confidence: Mapping[str, float] | None = None,
 ) -> Tuple[List[Detection], Image.Image]:
     """
     Execute a forward pass on a PIL image and return detections with an annotated copy.
@@ -198,6 +199,8 @@ def run_inference(
     detections: List[Detection] = []
     annotated = image.copy()
 
+    per_class_thresholds = dict(per_class_confidence or {})
+
     if len(pred) and pred[0] is not None and len(pred[0]):
         det = pred[0]
         det[:, :4] = scale_coords(
@@ -208,6 +211,9 @@ def run_inference(
             x1, y1, x2, y2 = map(int, xyxy)
             class_idx = int(cls)
             label = loaded.class_names[class_idx] if class_idx < len(loaded.class_names) else str(class_idx)
+            min_required_conf = per_class_thresholds.get(label, conf_thres)
+            if float(conf) < min_required_conf:
+                continue
             detections.append(Detection(label=label, confidence=float(conf), bbox=(x1, y1, x2, y2)))
             _draw_box(annotated, (x1, y1, x2, y2), label, float(conf))
     return detections, annotated
