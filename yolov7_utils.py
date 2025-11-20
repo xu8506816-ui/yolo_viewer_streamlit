@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import sys
+import zlib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Mapping, Sequence, Tuple, Union
@@ -43,6 +44,37 @@ class YoloV7MissingError(RuntimeError):
 
 
 _FONT = ImageFont.load_default()
+
+_COLOR_PALETTE: Tuple[Tuple[int, int, int], ...] = (
+    (244, 67, 54),    # red
+    (33, 150, 243),   # blue
+    (76, 175, 80),    # green
+    (255, 193, 7),    # amber
+    (156, 39, 176),   # purple
+    (0, 188, 212),    # teal
+    (255, 87, 34),    # deep orange
+    (121, 85, 72),    # brown
+    (63, 81, 181),    # indigo
+    (205, 220, 57),   # lime
+)
+
+_COLOR_OVERRIDES = {
+    "car": (76, 175, 80),
+}
+
+
+def _color_for_label(label: str) -> Tuple[int, int, int]:
+    """Return a deterministic color for the provided class label."""
+
+    normalized = label.strip().lower()
+    if normalized in _COLOR_OVERRIDES:
+        return _COLOR_OVERRIDES[normalized]
+
+    if not _COLOR_PALETTE:
+        return (255, 128, 0)
+    label_bytes = label.encode("utf-8", errors="ignore")
+    color_idx = zlib.crc32(label_bytes) % len(_COLOR_PALETTE)
+    return _COLOR_PALETTE[color_idx]
 
 
 def _resolve_repo_path() -> Path:
@@ -228,7 +260,7 @@ def _draw_box(
     """Render a labelled bounding box onto an image in-place."""
 
     x1, y1, x2, y2 = bbox
-    color = (255, 128, 0)
+    color = _color_for_label(label)
     outline_width = 2
 
     draw = ImageDraw.Draw(image_rgb)
