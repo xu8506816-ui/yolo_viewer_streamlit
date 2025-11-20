@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import io
 import tempfile
@@ -16,7 +16,8 @@ from yolov7_utils import LoadedModel, YoloV7MissingError, load_model, run_infere
 
 st.set_page_config(page_title="YOLOv7 Viewer", layout="wide")
 
-DEFAULT_WEIGHTS = Path("exp_custom_ciou_sgd") / "weights" / "best.pt"
+WEIGHTS_DIR = Path("weights")
+DEFAULT_WEIGHTS = WEIGHTS_DIR / "best.pt"
 
 
 @st.cache_resource(show_spinner=False)
@@ -27,8 +28,8 @@ def _cached_model(weights_path: str, device: str, imgsz: int) -> LoadedModel:
 def ensure_model(weights_path: Path, device: str, imgsz: int) -> LoadedModel:
     if not weights_path.is_file():
         st.error(
-            f"找不到權重檔案 `{weights_path}`。\n"
-            "請確認輸入的路徑正確，或將訓練好的 `.pt` 檔案放到指定位置。"
+            f"找不到模型權重檔 `{weights_path}`。\n"
+            "請確認路徑正確，或將訓練完成的 `.pt` 檔案放到該位置後再試一次。"
         )
         st.stop()
 
@@ -36,17 +37,30 @@ def ensure_model(weights_path: Path, device: str, imgsz: int) -> LoadedModel:
         return _cached_model(str(weights_path), device, imgsz)
     except FileNotFoundError:
         st.error(
-            f"讀取權重檔案 `{weights_path}` 失敗。\n"
-            "請確認 YOLOv7 的 `.pt` 模型位於專案根目錄下的正確路徑。"
+            f"讀取權重檔 `{weights_path}` 失敗。\n"
+            "請確認 YOLOv7 的 `.pt` 模型位於專案中設定的路徑。"
         )
         st.stop()
     except YoloV7MissingError as exc:
         st.error(str(exc))
         st.info(
             "範例：`git clone https://github.com/WongKinYiu/yolov7.git yolov7`\n"
-            "請確保資料夾位在專案根目錄。"
+            "請確認 `yolov7` 資料夾位在專案根目錄。"
         )
         st.stop()
+
+
+def _discover_available_weights(weights_dir: Path) -> list[Path]:
+    if not weights_dir.exists():
+        return []
+    return sorted(
+        (
+            weight_path
+            for weight_path in weights_dir.iterdir()
+            if weight_path.suffix.lower() == ".pt" and weight_path.is_file()
+        ),
+        key=lambda path: path.name.lower(),
+    )
 
 
 def _render_image_inference(
@@ -61,13 +75,13 @@ def _render_image_inference(
         key="image_uploader",
     )
     if not uploaded:
-        st.info("請上傳一張圖片。")
+        st.info("請先選擇一張圖片。")
         return
 
     try:
         image = Image.open(uploaded).convert("RGB")
     except Exception as exc:  # pylint: disable=broad-except
-        st.error(f"無法讀取圖片: {exc}")
+        st.error(f"無法讀取圖片：{exc}")
         return
 
     st.subheader("原始圖片")
@@ -90,7 +104,7 @@ def _render_image_inference(
             {
                 "類別": det.label,
                 "信心值": f"{det.confidence:.3f}",
-                "邊界框 (x1, y1, x2, y2)": det.bbox,
+                "框座標 (x1, y1, x2, y2)": det.bbox,
             }
             for det in detections
         ]
@@ -105,7 +119,7 @@ def _render_image_inference(
             mime="image/png",
         )
     else:
-        st.warning("未偵測到任何物件，請調整參數或更換圖片後再試。")
+        st.warning("未偵測到任何物件，請調整參數後再試一次。")
 
 
 def _render_video_inference(
@@ -118,10 +132,10 @@ def _render_video_inference(
         "上傳影片",
         type=["mp4", "mov", "avi", "mkv", "webm"],
         key="video_uploader",
-        help="影片會逐格推論並輸出標註後的 MP4 檔案。",
+        help="影片會逐格推論並輸出含標註結果的 MP4 檔案。",
     )
     if not video_file:
-        st.info("請上傳一段影片。")
+        st.info("請先選擇一段影片。")
         return
 
     suffix = Path(video_file.name).suffix or ".mp4"
@@ -137,7 +151,7 @@ def _render_video_inference(
 
     try:
         if not cap.isOpened():
-            st.error("無法開啟影片檔案，請確認格式是否支援。")
+            st.error("無法開啟影片檔案，請確認格式是否受支援。")
             return
 
         fps = cap.get(cv2.CAP_PROP_FPS)
@@ -158,13 +172,13 @@ def _render_video_inference(
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         writer = cv2.VideoWriter(str(output_path), fourcc, fps, (width, height))
         if not writer.isOpened():
-            st.error("無法建立輸出影片，請確認系統支援 MP4 編碼。")
+            st.error("建立輸出影片失敗，請確認系統支援 MP4 編碼。")
             return
 
         progress = st.progress(0.0) if total_frames else None
         frame_idx = 0
 
-        with st.spinner("影片偵測中，請稍候..."):
+        with st.spinner("影片推論中，請稍候..."):
             while True:
                 success, frame = cap.read()
                 if not success:
@@ -193,7 +207,7 @@ def _render_video_inference(
         if progress is not None:
             progress.progress(1.0)
 
-        # 先釋放資源，確保影片已完整寫入磁碟
+        # 確保釋放資源並完成影片寫入
         cap.release()
         cap = None
         if writer is not None:
@@ -225,7 +239,7 @@ def _render_video_inference(
             )
             st.dataframe(summary_df, use_container_width=True)
         else:
-            st.warning("影片中未偵測到任何物件，請調整參數後重試。")
+            st.warning("影片中未偵測到任何物件，請調整參數後再試一次。")
     finally:
         if cap is not None:
             cap.release()
@@ -238,21 +252,29 @@ def _render_video_inference(
 
 def main() -> None:
     st.title("YOLOv7 影像偵測檢視器")
-    st.caption("上傳影像或影片即可查看訓練好的 YOLOv7 模型推論結果。")
+    st.caption("上傳圖片或影片即可檢視訓練完成的 YOLOv7 模型輸出結果。")
 
     per_class_conf: dict[str, float] = {}
 
     with st.sidebar:
-        st.header("推論設定")
-        weights_path = Path(
-            st.text_input(
-                "權重檔案路徑 (.pt)",
-                value=str(DEFAULT_WEIGHTS),
-                help="預設使用 `exp_custom_ciou_sgd/weights/best.pt`。",
-            )
-        ).expanduser()
+        st.header("權重設定")
+        available_weights = _discover_available_weights(WEIGHTS_DIR)
+        if not available_weights:
+            st.error("請將 YOLOv7 `.pt` 權重檔放到專案的 `weights` 資料夾後再載入")
+            st.stop()
 
-        device = st.selectbox("裝置", options=["cpu", "0"], index=0, help="沒有 GPU 時選擇 `cpu`。")
+        default_index = next(
+            (idx for idx, path in enumerate(available_weights) if path == DEFAULT_WEIGHTS),
+            0,
+        )
+        weights_path = st.selectbox(
+            "選擇權重檔 (.pt)",
+            options=available_weights,
+            index=min(default_index, len(available_weights) - 1),
+            format_func=lambda path: path.name,
+            help="將訓練好的 `.pt` 權重檔放在 `weights/` 資料夾即可在這裡選擇。",
+        )
+        device = st.selectbox("裝置", options=["cpu", "0"], index=0, help="沒有 GPU 時可選擇 `cpu`。")
         imgsz = st.slider("輸入尺寸 (pix)", min_value=256, max_value=1280, value=640, step=64)
         conf_thres = st.slider("信心閾值", min_value=0.05, max_value=0.95, value=0.25, step=0.05)
         iou_thres = st.slider("IoU 閾值", min_value=0.1, max_value=0.9, value=0.45, step=0.05)
